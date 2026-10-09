@@ -100,7 +100,7 @@ runs:
       if: "${{ inputs.location == 'repository' && inputs.operation == 'upload' && inputs.encryption_key == '' }}"
       shell: bash
       run: |
-        git add ${{ inputs.directory }}/terraform.tfstate
+        git add -f  ${{ inputs.directory }}/terraform.tfstate
         git commit -m "🏗️ Automatically Updated Terraform State."
         git push
 
@@ -116,6 +116,6 @@ runs:
       shell: bash
       run: |
         openssl enc -e -aes256 -in ${{ inputs.directory }}/terraform.tfstate -out ${{ inputs.directory }}/terraform.tfstate.encrypted -k ${{ inputs.encryption_key }}
-        git add ${{ inputs.directory }}/terraform.tfstate.encrypted
+        git add -f  ${{ inputs.directory }}/terraform.tfstate.encrypted
         git commit -m "🏗️ Automatically Updated Encrypted Terraform State."
         git push
