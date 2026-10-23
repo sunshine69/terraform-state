@@ -48,7 +48,7 @@ runs:
     # ==================================================================
 
     - name: Download Artifact
-      if: "${{ inputs.location == 'artifact' && inputs.operation == 'download' && inputs.encryption_key == '' }}"
+      if: "${{ inputs.location == 'artifact' && inputs.operation == 'download' && inputs.encryption_key == '' && inputs.files == '' }}"
       shell: bash
       run: |
         REPO="${{ github.repository }}"
@@ -64,7 +64,7 @@ runs:
         fi
 
     - name: Upload Artifact
-      if: "${{ inputs.location == 'artifact' && inputs.operation == 'upload' && inputs.encryption_key == '' }}"
+      if: "${{ inputs.location == 'artifact' && inputs.operation == 'upload' && inputs.encryption_key == '' && inputs.files == '' }}"
       uses: actions/upload-artifact@v4
       with:
         name: Terraform State
@@ -228,7 +228,7 @@ runs:
     # ==================================================================
 
     - name: Commit Repository File
-      if: "${{ inputs.location == 'repository' && inputs.operation == 'upload' && inputs.encryption_key == '' }}"
+      if: "${{ inputs.location == 'repository' && inputs.operation == 'upload' && inputs.encryption_key == '' && inputs.files == '' }}"
       shell: bash
       run: |
         git add -f ${{ inputs.directory }}/terraform.tfstate
