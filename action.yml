@@ -34,6 +34,17 @@ inputs:
     required: false
     default: ""
 
+  branch:
+    description: >
+      Branch to read the files from and write them back to. When set, downloads
+      fetch the files from this branch and uploads commit them to this branch,
+      instead of the branch the calling workflow runs on. If empty (default) the
+      current branch is used, i.e. the normal behaviour.
+      NOTE: for location "artifact" this only filters downloads, because an
+      artifact is always attached to the branch of the run that created it.
+    required: false
+    default: ""
+
 runs:
   using: "composite"
   steps:
@@ -42,6 +53,18 @@ runs:
       run: |
         git config --global user.name "terraform-state"
         git config --global user.email "github-actions@users.noreply.github.com"
+
+    - name: Resolve Branch
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.branch }}" ]; then
+          echo "Operating against branch: ${{ inputs.branch }}"
+          if [ "${{ inputs.location }}" = "artifact" ] && [ "${{ inputs.operation }}" = "upload" ]; then
+            echo "::warning::Artifacts are always attached to the branch of the current workflow run; branch '${{ inputs.branch }}' can only be used to filter downloads, not uploads."
+          fi
+        else
+          echo "No branch input set; using the current branch ($(git rev-parse --abbrev-ref HEAD))."
+        fi
 
     # ==================================================================
     # ARTIFACT — unencrypted (existing behaviour, tfstate only)
@@ -54,12 +77,22 @@ runs:
         REPO="${{ github.repository }}"
         ARTIFACT_URI="https://api.github.com/repos/$REPO/actions/artifacts"
         TOKEN="${{ inputs.github_token }}"
+        BRANCH="${{ inputs.branch }}"
+        if [ -n "$BRANCH" ]; then
+          echo "Filtering artifacts by branch: $BRANCH"
+          FILTER="select(.name==\"Terraform State\" and .workflow_run.head_branch==\"$BRANCH\")"
+        else
+          FILTER="select(.name==\"Terraform State\")"
+        fi
         RESPONSE=$(curl -H "Authorization: token $TOKEN" -s $ARTIFACT_URI | jq -r '.artifacts[]')
         if [ "$RESPONSE" ] ; then
-          LATEST_ARTIFACT_URI=$(echo "$RESPONSE" | jq -r 'select(.name=="Terraform State") | .archive_download_url' | sort -r | head -n 1)
+          LATEST_ARTIFACT_URI=$(echo "$RESPONSE" | jq -r "$FILTER | .archive_download_url" | sort -r | head -n 1)
           if [ "$LATEST_ARTIFACT_URI" ] ; then
             curl -L -H "Authorization: token $TOKEN" -o ${{ inputs.directory }}/terraform.tfstate.zip "$LATEST_ARTIFACT_URI"
             unzip -o ${{ inputs.directory }}/terraform.tfstate.zip -d ${{ inputs.directory }}
+            rm -f ${{ inputs.directory }}/terraform.tfstate.zip
+          else
+            echo "::warning::No matching artifact found (skipping download)"
           fi
         fi
 
@@ -82,12 +115,22 @@ runs:
         REPO="${{ github.repository }}"
         ARTIFACT_URI="https://api.github.com/repos/$REPO/actions/artifacts"
         TOKEN="${{ inputs.github_token }}"
+        BRANCH="${{ inputs.branch }}"
+        if [ -n "$BRANCH" ]; then
+          echo "Filtering artifacts by branch: $BRANCH"
+          FILTER="select(.name==\"Encrypted Terraform State\" and .workflow_run.head_branch==\"$BRANCH\")"
+        else
+          FILTER="select(.name==\"Encrypted Terraform State\")"
+        fi
         RESPONSE=$(curl -H "Authorization: token $TOKEN" -s $ARTIFACT_URI | jq -r '.artifacts[]')
         if [ "$RESPONSE" ] ; then
-          LATEST_ARTIFACT_URI=$(echo "$RESPONSE" | jq -r 'select(.name=="Encrypted Terraform State") | .archive_download_url' | sort -r | head -n 1)
+          LATEST_ARTIFACT_URI=$(echo "$RESPONSE" | jq -r "$FILTER | .archive_download_url" | sort -r | head -n 1)
           if [ "$LATEST_ARTIFACT_URI" ] ; then
             curl -L -H "Authorization: token $TOKEN" -o ${{ inputs.directory }}/terraform.tfstate.encrypted.zip "$LATEST_ARTIFACT_URI"
             unzip -o ${{ inputs.directory }}/terraform.tfstate.encrypted.zip -d ${{ inputs.directory }}
+            rm -f ${{ inputs.directory }}/terraform.tfstate.encrypted.zip
+          else
+            echo "::warning::No matching artifact found (skipping download)"
           fi
         fi
 
@@ -128,6 +171,7 @@ runs:
         REPO="${{ github.repository }}"
         TOKEN="${{ inputs.github_token }}"
         API="https://api.github.com/repos/$REPO"
+        BRANCH="${{ inputs.branch }}"
         IFS=',' read -ra FILES <<< "${{ inputs.files }}"
         for f in "${FILES[@]}"; do
           f=$(echo "$f" | xargs)
@@ -136,7 +180,12 @@ runs:
           ARTIFACT_JSON=$(curl -s -H "Authorization: token $TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "$API/actions/artifacts?name=$artifact_name")
-          DOWNLOAD_URL=$(echo "$ARTIFACT_JSON" | jq -r '.artifacts[0].archive_download_url // empty')
+          if [ -n "$BRANCH" ]; then
+            DOWNLOAD_URL=$(echo "$ARTIFACT_JSON" | jq -r --arg b "$BRANCH" \
+              '[.artifacts[] | select(.workflow_run.head_branch==$b)][0].archive_download_url // empty')
+          else
+            DOWNLOAD_URL=$(echo "$ARTIFACT_JSON" | jq -r '.artifacts[0].archive_download_url // empty')
+          fi
           if [ -z "$DOWNLOAD_URL" ]; then
             echo "::warning::Artifact not found: $artifact_name (skipping)"
             continue
@@ -224,16 +273,58 @@ runs:
         done
 
     # ==================================================================
-    # REPOSITORY — unencrypted (existing behaviour, tfstate only)
+    # REPOSITORY — pull the files from a specific branch (only when the
+    #              branch input is set; otherwise the checked-out branch already
+    #              holds them)
     # ==================================================================
 
-    - name: Commit Repository File
-      if: "${{ inputs.location == 'repository' && inputs.operation == 'upload' && inputs.encryption_key == '' && inputs.files == '' }}"
+    - name: Fetch Files From Branch
+      if: "${{ inputs.location == 'repository' && inputs.operation == 'download' && inputs.branch != '' }}"
       shell: bash
       run: |
-        git add -f ${{ inputs.directory }}/terraform.tfstate
-        git commit -m "🏗️ Automatically Updated Terraform State."
-        git push
+        set -u
+        BRANCH="${{ inputs.branch }}"
+        DIR="${{ inputs.directory }}"
+        CURRENT=$(git rev-parse --abbrev-ref HEAD)
+        if [ "$BRANCH" = "$CURRENT" ]; then
+          echo "Requested branch is the current branch; nothing to fetch."
+          exit 0
+        fi
+        if ! git fetch -q -f --no-tags origin "$BRANCH":refs/remotes/origin/"$BRANCH"; then
+          echo "::error::Branch not found on origin: $BRANCH"
+          exit 1
+        fi
+        REF="refs/remotes/origin/$BRANCH"
+        PATHS=()
+        if [ -n "${{ inputs.files }}" ]; then
+          IFS=',' read -ra FILES <<< "${{ inputs.files }}"
+          for f in "${FILES[@]}"; do
+            PATHS+=("$DIR/$(echo "$f" | xargs).enc")
+          done
+        elif [ -n "${{ inputs.encryption_key }}" ]; then
+          PATHS+=("$DIR/terraform.tfstate.encrypted")
+        else
+          PATHS+=("$DIR/terraform.tfstate")
+        fi
+        FOUND=$(git ls-tree -r --name-only "$REF" -- "${PATHS[@]}")
+        if [ -z "$FOUND" ]; then
+          echo "::warning::No files found on branch $BRANCH (looked for: ${PATHS[*]})"
+          exit 0
+        fi
+        while IFS= read -r p; do
+          git checkout "$REF" -- "$p"
+          # Keep the fetched file in the working tree only — never leave it staged,
+          # so it cannot be swept into a commit on the caller's own branch.
+          git reset -q -- "$p"
+          echo "Fetched from $BRANCH: $p"
+        done <<< "$FOUND"
+
+    # ==================================================================
+    # REPOSITORY — unencrypted (existing behaviour, tfstate only)
+    #   download: files are already in the checkout (no step needed unless
+    #             the branch input points somewhere else, handled above)
+    #   upload:   handled by the generic Commit step below
+    # ==================================================================
 
     # ==================================================================
     # REPOSITORY — encrypted, tfstate (files input empty)
@@ -248,7 +339,7 @@ runs:
           -out ${{ inputs.directory }}/terraform.tfstate \
           -k ${{ inputs.encryption_key }}
 
-    - name: Encrypt and Commit Repository File
+    - name: Encrypt Repository File
       if: "${{ inputs.location == 'repository' && inputs.operation == 'upload' && inputs.encryption_key != '' && inputs.files == '' }}"
       shell: bash
       run: |
@@ -256,9 +347,6 @@ runs:
           -in ${{ inputs.directory }}/terraform.tfstate \
           -out ${{ inputs.directory }}/terraform.tfstate.encrypted \
           -k ${{ inputs.encryption_key }}
-        git add -f ${{ inputs.directory }}/terraform.tfstate.encrypted
-        git commit -m "🏗️ Automatically Updated Encrypted Terraform State."
-        git push
 
     # ==================================================================
     # REPOSITORY — encrypted, custom files (files input provided)
@@ -281,12 +369,11 @@ runs:
           echo "Decrypted: $f"
         done
 
-    - name: Encrypt and Commit Files (repository)
+    - name: Encrypt Files (repository)
       if: "${{ inputs.location == 'repository' && inputs.operation == 'upload' && inputs.encryption_key != '' && inputs.files != '' }}"
       shell: bash
       run: |
         IFS=',' read -ra FILES <<< "${{ inputs.files }}"
-        ENCS=()
         for f in "${FILES[@]}"; do
           f=$(echo "$f" | xargs)
           plain="${{ inputs.directory }}/${f}"
@@ -296,9 +383,75 @@ runs:
             exit 1
           fi
           openssl enc -e -aes256 -pbkdf2 -in "$plain" -out "$enc" -k ${{ inputs.encryption_key }}
-          ENCS+=("$enc")
           echo "Encrypted: $f -> $(basename "$f").enc"
         done
-        git add -f "${ENCS[@]}"
-        git commit -m "🔐 Automatically Updated Encrypted Files."
-        git push
+
+    # ==================================================================
+    # REPOSITORY — commit & push the (possibly encrypted) files.
+    # Without the branch input this commits to the current branch exactly as
+    # before; with it the files are committed on top of the remote tip of that
+    # branch (via a throwaway worktree, so the workflow's own working tree is
+    # left untouched) and pushed to that branch.
+    # ==================================================================
+
+    - name: Commit Repository File
+      if: "${{ inputs.location == 'repository' && inputs.operation == 'upload' }}"
+      shell: bash
+      run: |
+        set -u
+        DIR="${{ inputs.directory }}"
+        BRANCH="${{ inputs.branch }}"
+        if [ -n "${{ inputs.files }}" ]; then
+          MSG="🔐 Automatically Updated Encrypted Files."
+          PATHS=()
+          IFS=',' read -ra FILES <<< "${{ inputs.files }}"
+          for f in "${FILES[@]}"; do
+            PATHS+=("$DIR/$(echo "$f" | xargs).enc")
+          done
+        elif [ -n "${{ inputs.encryption_key }}" ]; then
+          MSG="🏗️ Automatically Updated Encrypted Terraform State."
+          PATHS=("$DIR/terraform.tfstate.encrypted")
+        else
+          MSG="🏗️ Automatically Updated Terraform State."
+          PATHS=("$DIR/terraform.tfstate")
+        fi
+        for p in "${PATHS[@]}"; do
+          if [ ! -f "$p" ]; then
+            echo "::error::File to commit not found: $p"
+            exit 1
+          fi
+        done
+        if [ -z "$BRANCH" ]; then
+          # ---- normal behaviour: commit on the current branch ----
+          git add -f "${PATHS[@]}"
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "$MSG"
+          git push
+        else
+          # ---- commit on the requested branch ----
+          CURRENT=$(git rev-parse --abbrev-ref HEAD)
+          if ! git fetch -q -f --no-tags origin "$BRANCH":refs/remotes/origin/"$BRANCH"; then
+            echo "::error::Branch not found on origin: $BRANCH"
+            exit 1
+          fi
+          REF="refs/remotes/origin/$BRANCH"
+          WT="$(mktemp -d /tmp/terraform-state-wt.XXXXXX)"
+          git worktree add -q --detach "$WT" "$REF"
+          for p in "${PATHS[@]}"; do
+            mkdir -p "$WT/$(dirname "$p")"
+            cp "$p" "$WT/$p"
+            git -C "$WT" add -f -- "$p"
+          done
+          if git -C "$WT" diff --cached --quiet; then
+            echo "No changes to commit on branch $BRANCH."
+            git worktree remove --force "$WT"
+            exit 0
+          fi
+          git -C "$WT" commit -q -m "$MSG"
+          git -C "$WT" push -q origin "HEAD:refs/heads/$BRANCH"
+          git worktree remove --force "$WT"
+          echo "Committed to branch: $BRANCH (working tree stayed on $CURRENT)."
+        fi
