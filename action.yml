@@ -126,9 +126,9 @@ runs:
         if [ "$RESPONSE" ] ; then
           LATEST_ARTIFACT_URI=$(echo "$RESPONSE" | jq -r "$FILTER | .archive_download_url" | sort -r | head -n 1)
           if [ "$LATEST_ARTIFACT_URI" ] ; then
-            curl -L -H "Authorization: token $TOKEN" -o ${{ inputs.directory }}/terraform.tfstate.encrypted.zip "$LATEST_ARTIFACT_URI"
-            unzip -o ${{ inputs.directory }}/terraform.tfstate.encrypted.zip -d ${{ inputs.directory }}
-            rm -f ${{ inputs.directory }}/terraform.tfstate.encrypted.zip
+            curl -L -H "Authorization: token $TOKEN" -o ${{ inputs.directory }}/terraform.tfstate.enc.zip "$LATEST_ARTIFACT_URI"
+            unzip -o ${{ inputs.directory }}/terraform.tfstate.enc.zip -d ${{ inputs.directory }}
+            rm -f ${{ inputs.directory }}/terraform.tfstate.enc.zip
           else
             echo "::warning::No matching artifact found (skipping download)"
           fi
@@ -139,7 +139,7 @@ runs:
       shell: bash
       run: |
         openssl enc -d -aes256 -pbkdf2 \
-          -in ${{ inputs.directory }}/terraform.tfstate.encrypted \
+          -in ${{ inputs.directory }}/terraform.tfstate.enc \
           -out ${{ inputs.directory }}/terraform.tfstate \
           -k ${{ inputs.encryption_key }}
 
@@ -149,7 +149,7 @@ runs:
       run: |
         openssl enc -e -aes256 -pbkdf2 \
           -in ${{ inputs.directory }}/terraform.tfstate \
-          -out ${{ inputs.directory }}/terraform.tfstate.encrypted \
+          -out ${{ inputs.directory }}/terraform.tfstate.enc \
           -k ${{ inputs.encryption_key }}
 
     - name: Upload Encrypted Artifact
@@ -157,7 +157,7 @@ runs:
       uses: actions/upload-artifact@v4
       with:
         name: Encrypted Terraform State
-        path: "${{ inputs.directory }}/terraform.tfstate.encrypted"
+        path: "${{ inputs.directory }}/terraform.tfstate.enc"
         overwrite: true
 
     # ==================================================================
@@ -302,7 +302,7 @@ runs:
             PATHS+=("$DIR/$(echo "$f" | xargs).enc")
           done
         elif [ -n "${{ inputs.encryption_key }}" ]; then
-          PATHS+=("$DIR/terraform.tfstate.encrypted")
+          PATHS+=("$DIR/terraform.tfstate.enc")
         else
           PATHS+=("$DIR/terraform.tfstate")
         fi
@@ -335,7 +335,7 @@ runs:
       shell: bash
       run: |
         openssl enc -d -aes256 -pbkdf2 \
-          -in ${{ inputs.directory }}/terraform.tfstate.encrypted \
+          -in ${{ inputs.directory }}/terraform.tfstate.enc \
           -out ${{ inputs.directory }}/terraform.tfstate \
           -k ${{ inputs.encryption_key }}
 
@@ -345,7 +345,7 @@ runs:
       run: |
         openssl enc -e -aes256 -pbkdf2 \
           -in ${{ inputs.directory }}/terraform.tfstate \
-          -out ${{ inputs.directory }}/terraform.tfstate.encrypted \
+          -out ${{ inputs.directory }}/terraform.tfstate.enc \
           -k ${{ inputs.encryption_key }}
 
     # ==================================================================
@@ -410,7 +410,7 @@ runs:
           done
         elif [ -n "${{ inputs.encryption_key }}" ]; then
           MSG="🏗️ Automatically Updated Encrypted Terraform State."
-          PATHS=("$DIR/terraform.tfstate.encrypted")
+          PATHS=("$DIR/terraform.tfstate.enc")
         else
           MSG="🏗️ Automatically Updated Terraform State."
           PATHS=("$DIR/terraform.tfstate")

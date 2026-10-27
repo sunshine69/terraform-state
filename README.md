@@ -35,7 +35,7 @@ When storing the Terraform state within the repository, changes are commited to 
 push:
   paths-ignore:
     - "**.tfstate"
-    - "**.tfstate.encrypted"
+    - "**.tfstate.enc"
 ```
 
 #### Artifact
